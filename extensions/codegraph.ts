@@ -9,6 +9,8 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 
 const INSTALL_HINT =
 	"codegraph CLI not found on PATH. Install: npm i -g @colbymchenry/codegraph";
@@ -35,6 +37,20 @@ function textResult(text: string) {
 function outputOf(result: { stdout: string; stderr: string; code: number }): string {
 	return (result.stdout + result.stderr).trim() || `exit ${result.code}`;
 }
+
+// Modeled on upstream's MCP SERVER_INSTRUCTIONS (src/mcp/server-instructions.ts):
+// lead the agent to codegraph_explore BEFORE grep/read, plus anti-patterns.
+// Kept tight — the agent reads this every session (upstream: "long
+// instructions burn tokens").
+const INDEX_HINT = `# CodeGraph — this project is indexed
+
+A \`.codegraph/\` index exists here: SQLite knowledge graph of every symbol, edge, and file. ONE \`codegraph_explore\` call returns the relevant symbols' verbatim line-numbered source (treat it as already Read — safe to Edit from) PLUS call paths between them and a blast-radius summary of what depends on them.
+
+- For structural questions (how does X work / where is X / who calls Y / what breaks if I change Z), call \`codegraph_explore\` INSTEAD of grep + read — usually ONE call answers the whole question.
+- Call it BEFORE and WHILE writing or editing code: it puts the blast radius in view before you touch a symbol you can name.
+- Anti-patterns: don't grep or Read first; don't re-verify codegraph output with grep (AST-derived, more accurate than grep); don't reconstruct a flow by hand — name the endpoint symbols and it surfaces the path.
+- Reach for raw Read/Grep only for what codegraph doesn't index (configs, docs, recent uncommitted edits — the index lags writes slightly).
+- If a project has no \`.codegraph/\`, use built-in tools there; indexing is the user's decision — suggest /codegraph-init if it comes up.`;
 
 export default function codegraphExtension(pi: ExtensionAPI) {
 	// ── codegraph_explore tool ─────────────────────────────────────────────
@@ -120,8 +136,8 @@ export default function codegraphExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	// ── session_start: CLI check + incremental sync ────────────────────────
-	pi.on("session_start", async (_event, ctx) => {
+	// ── session_start: CLI check + incremental sync + context hint ────────
+	 pi.on("session_start", async (event, ctx) => {
 		if (!(await ensureCli(pi))) {
 			if (ctx.hasUI && !notifiedMissing) {
 				notifiedMissing = true;
@@ -133,5 +149,19 @@ export default function codegraphExtension(pi: ExtensionAPI) {
 		// when the project has no index — indexing stays the user's decision
 		// (docs/adr/0002).
 		void pi.exec("codegraph", ["sync", "-q", ctx.cwd], { timeout: 300_000 }).catch(() => {});
+		// Inject the agent playbook once per process when the project IS
+		// indexed (upstream does this via MCP initialize instructions). Skip
+		// "reload": extensions rebind in place and the message would duplicate.
+		if (event.reason !== "reload") {
+			try {
+				await fs.access(path.join(ctx.cwd, ".codegraph"));
+				pi.sendMessage(
+					{ customType: "codegraph-context", content: INDEX_HINT, display: false },
+					{ triggerTurn: false },
+				);
+			} catch {
+				// no index — stay quiet
+			}
+		}
 	});
 }
