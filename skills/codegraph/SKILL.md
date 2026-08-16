@@ -10,16 +10,18 @@ The `codegraph_explore` tool answers structural code questions in one shot: the 
 ## When to use
 
 - "How does X work?" / "Where is X?" / "What calls Y?" / "What breaks if I change Z?"
-- Before an edit, to map the symbols you are about to touch.
-- Prefer it over grep/read for these questions **when the project has a `.codegraph/` index**.
+- Before an edit, to map the symbols you are about to touch and inspect the blast radius.
+- Prefer it over grep/read for structural exploration **when the project has a `.codegraph/` index**.
 
 ## How to query
 
-- `query`: symbol names (`CodeGraph open`, `MCPSession`) or a natural-language question. Naming a file or symbol returns its current line-numbered source.
-- `path`: optional project path. Defaults to the current working directory. In a monorepo, pass the sub-project that has the index.
+- `query`: symbol names (`CodeGraph open`, `MCPSession`), endpoint flows (`mutateElement renderScene`), or a natural-language question. Naming a file or symbol returns its current line-numbered source.
+- `path`: optional project path. Defaults to the current working directory. In a monorepo, pass the sub-project directory that contains `.codegraph/`.
+- `maxFiles`: optional integer to limit how many file sources are returned.
 
-## Boundaries
+## Anti-patterns & Guidance
 
-- **No index, no tool.** If the output says the project isn't indexed, stop calling `codegraph_explore` for that project this session and use the built-in tools. Indexing is the user's decision — never run `codegraph init` yourself; suggest the user run `/codegraph-init` if it comes up.
-- **Freshness.** The index syncs at session start; mid-session edits can lag. For code written in the last few minutes, trust the editor/diff over the index.
-- **Not a compiler.** Cross-file resolution is best-effort name matching. Correctness validation stays with the compiler, tests, and linters.
+- **Trust AST results.** Don't re-verify codegraph output with grep.
+- **Already sent earlier in this conversation.** When this pointer appears, the lines are already in your session context — scroll back instead of re-fetching or reading the file.
+- **Staleness banner.** If output warns `⚠️ Some files referenced below were edited since the last index sync`, read only those specific files directly; other files in the response remain fresh.
+- **No index, no tool.** If the output says the project isn't indexed, stop calling `codegraph_explore` for that project this session and use built-in tools. Indexing is the user's decision — suggest the user run `/codegraph-init` if appropriate.

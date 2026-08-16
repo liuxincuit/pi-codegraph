@@ -45,9 +45,11 @@ pi -e ./extensions/codegraph.ts
 
 ## What you get
 
-- **`codegraph_explore` tool** — the agent's primary code-intelligence tool. Query with symbol names or a natural-language question; optionally pass `path` to query another indexed project.
-- **`/codegraph-init`** — build the index for the current project (`codegraph init`).
-- **`/codegraph-status`** — index status and statistics (`codegraph status`).
+- **`codegraph_explore` tool** — the agent's primary code-intelligence tool. Query with symbol names or a natural-language question; optionally pass `path` to query another indexed project, and `maxFiles` to cap source lines.
+- **`/codegraph-init [path]`** — build the index for the project (`codegraph init`).
+- **`/codegraph-sync [path]`** — manually sync changes since last index (`codegraph sync`).
+- **`/codegraph-status [path]`** — index status and statistics (`codegraph status`).
+- **`/codegraph-unlock [path]`** — release stale database locks if daemon crashed (`codegraph unlock`).
 - **Session-start sync** — runs `codegraph sync -q` once per session so the index reflects your last edits.
 
 ## Usage
