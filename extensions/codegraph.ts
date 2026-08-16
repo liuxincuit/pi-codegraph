@@ -51,19 +51,22 @@ function outputOf(result: { stdout: string; stderr: string; code: number }): str
 
 async function isIndexed(cwd: string): Promise<boolean> {
 	try {
-		await fs.access(path.join(cwd, ".codegraph"));
+		await fs.access(path.join(cwd, ".codegraph", "codegraph.db"));
 		return true;
 	} catch {
 		return false;
 	}
 }
 
-function updateStatusBar(ctx: ExtensionContext, indexed: boolean) {
+type StatusState = "index" | "sync" | "init" | boolean | undefined;
+
+function updateStatusBar(ctx: ExtensionContext, state: StatusState) {
 	if (!ctx.hasUI) return;
-	if (indexed) {
+	const label = state === true ? "index" : state === false ? undefined : state;
+	if (label) {
 		const text = ctx.ui.theme?.fg
-			? `${ctx.ui.theme.fg("accent", "⬡")} index`
-			: "⬡ index";
+			? `${ctx.ui.theme.fg("accent", "⬡")} ${label}`
+			: `⬡ ${label}`;
 		ctx.ui.setStatus("codegraph", text);
 	} else {
 		ctx.ui.setStatus("codegraph", undefined);
@@ -146,20 +149,24 @@ export default function codegraphExtension(pi: ExtensionAPI) {
 			if (ctx.hasUI) {
 				ctx.ui.notify(`Indexing ${target} — can take minutes on a large repo…`, "info");
 			}
-			const result = await execCg(pi, ["init", target], { timeout: 1_800_000 });
-			const out = outputOf(result);
-			const success = result.code === 0;
-			if (ctx.hasUI) {
-				ctx.ui.notify(
-					success ? "CodeGraph index built." : `codegraph init failed (exit ${result.code})`,
-					success ? "info" : "error",
+			updateStatusBar(ctx, "init");
+			try {
+				const result = await execCg(pi, ["init", target], { timeout: 1_800_000 });
+				const out = outputOf(result);
+				const success = result.code === 0;
+				if (ctx.hasUI) {
+					ctx.ui.notify(
+						success ? "CodeGraph index built." : `codegraph init failed (exit ${result.code})`,
+						success ? "info" : "error",
+					);
+				}
+				pi.sendMessage(
+					{ customType: "codegraph-init", content: out, display: true },
+					{ triggerTurn: false },
 				);
+			} finally {
+				updateStatusBar(ctx, await isIndexed(ctx.cwd));
 			}
-			updateStatusBar(ctx, success || (await isIndexed(ctx.cwd)));
-			pi.sendMessage(
-				{ customType: "codegraph-init", content: out, display: true },
-				{ triggerTurn: false },
-			);
 		},
 	});
 
@@ -175,16 +182,20 @@ export default function codegraphExtension(pi: ExtensionAPI) {
 			if (ctx.hasUI) {
 				ctx.ui.notify(`Syncing CodeGraph for ${target}…`, "info");
 			}
-			const result = await execCg(pi, ["sync", target], { timeout: 300_000 });
-			const out = outputOf(result);
-			if (ctx.hasUI) {
-				ctx.ui.notify(out, result.code === 0 ? "info" : "warning");
+			updateStatusBar(ctx, "sync");
+			try {
+				const result = await execCg(pi, ["sync", target], { timeout: 300_000 });
+				const out = outputOf(result);
+				if (ctx.hasUI) {
+					ctx.ui.notify(out, result.code === 0 ? "info" : "warning");
+				}
+				pi.sendMessage(
+					{ customType: "codegraph-sync", content: out, display: true },
+					{ triggerTurn: false },
+				);
+			} finally {
+				updateStatusBar(ctx, await isIndexed(ctx.cwd));
 			}
-			updateStatusBar(ctx, await isIndexed(ctx.cwd));
-			pi.sendMessage(
-				{ customType: "codegraph-sync", content: out, display: true },
-				{ triggerTurn: false },
-			);
 		},
 	});
 
@@ -200,7 +211,7 @@ export default function codegraphExtension(pi: ExtensionAPI) {
 			const result = await execCg(pi, ["status", target], { timeout: 30_000 });
 			const out = outputOf(result);
 			if (ctx.hasUI) ctx.ui.notify(out, result.code === 0 ? "info" : "warning");
-			updateStatusBar(ctx, result.code === 0);
+			updateStatusBar(ctx, await isIndexed(ctx.cwd));
 			pi.sendMessage(
 				{ customType: "codegraph-status", content: out, display: true },
 				{ triggerTurn: false },
@@ -230,6 +241,7 @@ export default function codegraphExtension(pi: ExtensionAPI) {
 	// ── session_start: CLI check + incremental sync + context hint ────────
 	pi.on("session_start", async (event, ctx) => {
 		if (!(await ensureCli(pi))) {
+			updateStatusBar(ctx, false);
 			if (ctx.hasUI && !notifiedMissing) {
 				notifiedMissing = true;
 				ctx.ui.notify(INSTALL_HINT, "warning");
@@ -238,12 +250,17 @@ export default function codegraphExtension(pi: ExtensionAPI) {
 		}
 
 		const indexed = await isIndexed(ctx.cwd);
-		updateStatusBar(ctx, indexed);
-
-		// Incremental sync; near-zero cost when nothing changed. Exits quietly
-		// when the project has no index — indexing stays the user's decision
-		// (docs/adr/0002).
-		void execCg(pi, ["sync", "-q", ctx.cwd], { timeout: 300_000 }).catch(() => {});
+		if (indexed) {
+			updateStatusBar(ctx, "sync");
+			// Incremental sync; near-zero cost when nothing changed.
+			void execCg(pi, ["sync", "-q", ctx.cwd], { timeout: 300_000 })
+				.catch(() => {})
+				.finally(async () => {
+					updateStatusBar(ctx, await isIndexed(ctx.cwd));
+				});
+		} else {
+			updateStatusBar(ctx, false);
+		}
 
 		// Inject the agent playbook once per process when the project IS
 		// indexed (upstream does this via MCP initialize instructions). Skip
