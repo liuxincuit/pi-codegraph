@@ -8,7 +8,7 @@
 // Upstream: https://github.com/colbymchenry/codegraph
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import { TSchema, Type } from "typebox";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -79,14 +79,19 @@ function updateStatusBar(ctx: ExtensionContext, state: StatusState) {
 }
 
 // Modeled on upstream's MCP SERVER_INSTRUCTIONS (src/mcp/server-instructions.ts):
-// lead the agent to codegraph_explore BEFORE grep/read, plus anti-patterns and staleness handling.
+// lead the agent to the codegraph_* tools BEFORE grep/read, plus anti-patterns and staleness handling.
 const INDEX_HINT = `# CodeGraph — this project is indexed
 
-A \`.codegraph/\` index exists here: SQLite knowledge graph of every symbol, edge, and file (30+ languages). ONE \`codegraph_explore\` call returns the relevant symbols' verbatim line-numbered source (treat it as already Read — safe to Edit from) PLUS call paths between them and a blast-radius summary of what depends on them.
+A \`.codegraph/\` index exists here: SQLite knowledge graph of every symbol, edge, and file (30+ languages). It answers structural code questions with verbatim, line-numbered source (treat codegraph output as already Read — safe to Edit from).
 
-- For structural questions (how does X work / where is X / who calls Y / what breaks if I change Z), call \`codegraph_explore\` INSTEAD of grep + read — usually ONE call answers the whole question.
-- Call it BEFORE and WHILE writing or editing code: it puts the blast radius in view before you touch a symbol you can name.
-- Flow tracing: name endpoint symbols (e.g. \`mutateElement renderScene\`) to surface the path across dynamic-dispatch hops.
+- For structural questions (how does X work / where is X / who calls Y / what breaks if I change Z), use the codegraph_* tools INSTEAD of grep + read — usually ONE call answers the whole question.
+- Choose the right tool:
+  - \`codegraph_query\` — locate a symbol: locations + signatures only.
+  - \`codegraph_node\` — one symbol's source + caller/callee trail (chain it to follow a call graph).
+  - \`codegraph_callers\` — who calls a symbol. \`codegraph_callees\` — what a symbol calls.
+  - \`codegraph_impact\` — blast radius of changing a symbol (call before editing).
+  - \`codegraph_files\` — indexed file tree (tree/flat/grouped by language).
+  - \`codegraph_explore\` — broad questions: relevant symbols' source + call paths in one shot. Name endpoint symbols (e.g. \`mutateElement renderScene\`) to surface paths across dynamic-dispatch hops.
 - Anti-patterns: don't grep or Read first; don't re-verify codegraph output with grep (AST-derived, more accurate than grep); don't reconstruct a flow by hand.
 - "Already sent earlier in this conversation": pointer means content is already in context — do not re-fetch or Read.
 - Staleness: if tool output contains "⚠️ Some files referenced below were edited since the last index sync", read only those flagged files directly.
@@ -155,6 +160,193 @@ export default async function codegraphExtension(pi: ExtensionAPI) {
 			return textResult(result.stdout.trim());
 		},
 	});
+
+	// ── codegraph_* fine-grained tools (CLI parity with the MCP tools) ────
+	// Each maps 1:1 to a codegraph CLI subcommand; `path` selects the project,
+	// defaults to the session cwd (same convention as codegraph_explore).
+	const projectPath = () =>
+		Type.Optional(
+			Type.String({
+				description: "Project path to query; defaults to the current working directory",
+			}),
+		);
+
+	type CliToolDef = {
+		name: string;
+		label: string;
+		description: string;
+		snippet: string;
+		guidelines: string[];
+		subcommand: string;
+		parameters: TSchema;
+		positional?: (p: Record<string, unknown>) => string[];
+		flags?: (p: Record<string, unknown>) => string[];
+		timeout?: number;
+	};
+
+	function registerCliTool(pi: ExtensionAPI, def: CliToolDef) {
+		pi.registerTool({
+			name: def.name,
+			label: def.label,
+			description: def.description,
+			promptSnippet: def.snippet,
+			promptGuidelines: def.guidelines,
+			parameters: def.parameters,
+			execute: async (_toolCallId, params: Record<string, unknown>, signal, _onUpdate, ctx) => {
+				const cwd = (params.path as string | undefined) ?? ctx.cwd;
+				const args = [
+					def.subcommand,
+					...(def.positional?.(params) ?? []),
+					"-p",
+					cwd,
+					...(def.flags?.(params) ?? []),
+				];
+				const result = await execCg(pi, args, {
+					signal,
+					timeout: def.timeout ?? 60_000,
+				});
+				if (result.killed) return textResult(`codegraph ${def.subcommand} timed out`);
+				// Non-zero exits carry upstream's agent-friendly guidance — pass it through.
+				if (result.code !== 0) return textResult(outputOf(result));
+				return textResult(result.stdout.trim());
+			},
+		});
+	}
+
+	const cliTools: CliToolDef[] = [
+		{
+			name: "codegraph_query",
+			label: "CodeGraph Query",
+			description:
+				"Search symbols by name. Returns locations and signatures only (no source). Use to locate where a symbol is declared.",
+			snippet: "codegraph_query: symbol locations + signatures by name",
+			guidelines: [
+				"To locate where a symbol is declared (kind, file, line), use codegraph_query before grep.",
+			],
+			subcommand: "query",
+			parameters: Type.Object({
+				search: Type.String({ description: "Symbol name or partial name to search" }),
+				kind: Type.Optional(
+					Type.String({
+						description:
+							"Filter by node kind: function, method, class, interface, type, variable, route, component",
+					}),
+				),
+				limit: Type.Optional(Type.Integer({ description: "Maximum results (default 10)" })),
+				path: projectPath(),
+			}),
+			positional: (p) => [p.search as string],
+			flags: (p) => [
+				...(p.kind ? ["--kind", p.kind as string] : []),
+				...(typeof p.limit === "number" && p.limit > 0 ? ["--limit", String(p.limit)] : []),
+			],
+		},
+		{
+			name: "codegraph_node",
+			label: "CodeGraph Node",
+			description:
+				"One symbol's source plus its caller/callee trail. Chain it to follow a call graph across files.",
+			snippet: "codegraph_node: a symbol's source + caller/callee trail",
+			guidelines: [
+				"To deep-dive one known symbol (verbatim source + who it calls / is called by), use codegraph_node.",
+			],
+			subcommand: "node",
+			parameters: Type.Object({
+				name: Type.String({ description: "Symbol name to inspect" }),
+				path: projectPath(),
+			}),
+			positional: (p) => [p.name as string],
+		},
+		{
+			name: "codegraph_callers",
+			label: "CodeGraph Callers",
+			description: "Find all functions or methods that call a specific symbol.",
+			snippet: "codegraph_callers: who calls a symbol",
+			guidelines: [
+				"To find what calls a symbol (reverse dependencies), use codegraph_callers.",
+			],
+			subcommand: "callers",
+			parameters: Type.Object({
+				symbol: Type.String({ description: "Symbol name whose callers to find" }),
+				limit: Type.Optional(Type.Integer({ description: "Maximum results (default 20)" })),
+				path: projectPath(),
+			}),
+			positional: (p) => [p.symbol as string],
+			flags: (p) => [
+				...(typeof p.limit === "number" && p.limit > 0 ? ["--limit", String(p.limit)] : []),
+			],
+		},
+		{
+			name: "codegraph_callees",
+			label: "CodeGraph Callees",
+			description: "Find all functions or methods that a specific symbol calls.",
+			snippet: "codegraph_callees: what a symbol calls",
+			guidelines: [
+				"To find what a symbol calls (its outgoing edges), use codegraph_callees.",
+			],
+			subcommand: "callees",
+			parameters: Type.Object({
+				symbol: Type.String({ description: "Symbol name whose callees to find" }),
+				limit: Type.Optional(Type.Integer({ description: "Maximum results (default 20)" })),
+				path: projectPath(),
+			}),
+			positional: (p) => [p.symbol as string],
+			flags: (p) => [
+				...(typeof p.limit === "number" && p.limit > 0 ? ["--limit", String(p.limit)] : []),
+			],
+		},
+		{
+			name: "codegraph_impact",
+			label: "CodeGraph Impact",
+			description: "Analyze what code is affected by changing a symbol (blast radius).",
+			snippet: "codegraph_impact: blast radius of changing a symbol",
+			guidelines: [
+				"Before editing a symbol, use codegraph_impact to see what depends on it.",
+			],
+			subcommand: "impact",
+			parameters: Type.Object({
+				symbol: Type.String({ description: "Symbol name to analyze impact of changing" }),
+				depth: Type.Optional(Type.Integer({ description: "Traversal depth (default 2)" })),
+				path: projectPath(),
+			}),
+			positional: (p) => [p.symbol as string],
+			flags: (p) => [
+				...(typeof p.depth === "number" && p.depth > 0 ? ["--depth", String(p.depth)] : []),
+			],
+		},
+		{
+			name: "codegraph_files",
+			label: "CodeGraph Files",
+			description:
+				"Show the indexed project's file structure (tree, flat, or grouped by language), with per-file symbol counts.",
+			snippet: "codegraph_files: indexed file tree with symbol counts",
+			guidelines: [
+				"To get a structured view of the project files, use codegraph_files.",
+			],
+			subcommand: "files",
+			parameters: Type.Object({
+				dir: Type.Optional(Type.String({ description: "Subdirectory within the project to show" })),
+				pattern: Type.Optional(Type.String({ description: "Glob pattern to filter files" })),
+				format: Type.Optional(
+					Type.Union([Type.Literal("tree"), Type.Literal("flat"), Type.Literal("grouped")]),
+				),
+				maxDepth: Type.Optional(Type.Integer({ description: "Maximum directory depth for tree format" })),
+				path: projectPath(),
+			}),
+			positional: (p) => (p.dir ? [p.dir as string] : []),
+			flags: (p) => [
+				...(p.pattern ? ["--pattern", p.pattern as string] : []),
+				...(p.format ? ["--format", p.format as string] : []),
+				...(typeof p.maxDepth === "number" && p.maxDepth > 0
+					? ["--max-depth", String(p.maxDepth)]
+					: []),
+			],
+		},
+	];
+
+	for (const tool of cliTools) {
+		registerCliTool(pi, tool);
+	}
 
 	// ── /codegraph-init ────────────────────────────────────────────────────
 	pi.registerCommand("codegraph-init", {

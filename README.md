@@ -49,7 +49,13 @@ pi -e ./extensions/codegraph.ts
 
 ## 功能一览
 
-- **`codegraph_explore` 工具** — 面向智能体的核心代码智能工具。输入符号名或自然语言问题即可查询；可选传 `path` 查询其他已建索引的项目，传 `maxFiles` 限制返回的源码行数。
+- **`codegraph_*` 工具集** — 面向智能体的代码智能工具，均支持 `path` 参数查询其他已建索引的项目：
+  - `codegraph_explore` — 一揽子探索：相关符号逐字源码 + 调用路径 + 影响范围（`maxFiles` 限制返回行数）
+  - `codegraph_query` — 按名称搜索符号（位置 + 签名，可选 `kind`/`limit` 过滤）
+  - `codegraph_node` — 单个符号的源码 + 调用轨迹，可链式追踪调用图
+  - `codegraph_callers` / `codegraph_callees` — 谁调用了它 / 它调用了谁（`limit`）
+  - `codegraph_impact` — 修改符号的影响半径（`depth`）
+  - `codegraph_files` — 从索引查看文件结构（tree/flat/grouped，`pattern`、`maxDepth`）
 - **`/codegraph-init [path]`** — 为项目建立索引（`codegraph init`）。
 - **`/codegraph-sync [path]`** — 手动同步自上次索引以来的改动（`codegraph sync`）。
 - **`/codegraph-status [path]`** — 查看索引状态与统计信息（`codegraph status`）。

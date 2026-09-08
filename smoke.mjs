@@ -76,7 +76,13 @@ const loadExtension = (pi) =>
 }
 
 // ── Scenario 2: real codegraph CLI present → full functionality ─────────
-const cliProbe = await exec("codegraph", ["version"]);
+// npm global installs land as .cmd shims on Windows; execFile can't resolve
+// them, so probe through cmd.exe like the extension's execCg does.
+const probe = async () =>
+	process.platform === "win32"
+		? exec("cmd.exe", ["/d", "/s", "/c", "codegraph", "version"])
+		: exec("codegraph", ["version"]);
+const cliProbe = await probe();
 if (cliProbe.code !== 0) {
 	console.log("SKIP: full-functionality scenario (codegraph CLI not on PATH)");
 } else {
@@ -98,6 +104,24 @@ if (cliProbe.code !== 0) {
 	commands.get("codegraph-status") ?? fail("status not registered");
 	commands.get("codegraph-unlock") ?? fail("unlock not registered");
 	console.log("Commands registration OK");
+
+	// Check tools registered
+	const expectedTools = [
+		"codegraph_explore",
+		"codegraph_query",
+		"codegraph_node",
+		"codegraph_callers",
+		"codegraph_callees",
+		"codegraph_impact",
+		"codegraph_files",
+	];
+	for (const name of expectedTools) {
+		if (!tools.has(name)) fail(`tool not registered: ${name}`);
+	}
+	if (tools.size !== expectedTools.length) {
+		fail(`unexpected tool count: got ${tools.size}, want ${expectedTools.length} (${[...tools.keys()]})`);
+	}
+	console.log("Tools registration OK");
 
 	const sync = commands.get("codegraph-sync");
 	if (!handlers.has("resources_discover")) fail("resources_discover not registered when CLI present");
