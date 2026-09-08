@@ -1,9 +1,14 @@
 {
 	"name": "@liuxincuit/pi-codegraph",
-	"version": "0.2.1",
+	"version": "0.1.0",
 	"description": "CodeGraph support for pi — symbol source + call paths via the codegraph CLI",
 	"type": "module",
-	"keywords": ["pi-package", "codegraph", "code-intelligence", "knowledge-graph"],
+	"keywords": [
+		"pi-package",
+		"codegraph",
+		"code-intelligence",
+		"knowledge-graph"
+	],
 	"repository": {
 		"type": "git",
 		"url": "git+https://github.com/liuxincuit/pi-codegraph.git"
@@ -24,8 +29,12 @@
 		"smoke": "tsc extensions/codegraph.ts --outDir .smoke-build --module esnext --target es2022 --moduleResolution bundler --skipLibCheck --noEmit false && node smoke.mjs"
 	},
 	"pi": {
-		"extensions": ["./extensions"],
-		"skills": ["./skills"]
+		"extensions": [
+			"./extensions"
+		],
+		"skills": [
+			"./skills"
+		]
 	},
 	"files": [
 		"extensions/",
