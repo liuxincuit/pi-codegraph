@@ -118,9 +118,7 @@ export default async function codegraphExtension(pi: ExtensionAPI) {
 		name: "codegraph_explore",
 		label: "CodeGraph Explore",
 		description:
-			"PRIMARY tool for code questions — call it BEFORE grep/read when the project has a .codegraph/ index. " +
-			"One query returns the relevant symbols' verbatim line-numbered source plus the call paths between them and a blast-radius summary. " +
-			"If the project is not indexed the output says so: continue with built-in tools and suggest the user run /codegraph-init.",
+			"Broad code exploration in one shot: relevant symbols' verbatim line-numbered source, call paths between them, and a blast-radius summary.",
 		promptSnippet:
 			"codegraph_explore: symbol source + call paths in one shot from the project's CodeGraph index",
 		promptGuidelines: [
@@ -133,7 +131,7 @@ export default async function codegraphExtension(pi: ExtensionAPI) {
 			}),
 			path: Type.Optional(
 				Type.String({
-					description: "Project path to query; defaults to the current working directory",
+					description: "Project path (default: cwd)",
 				}),
 			),
 			maxFiles: Type.Optional(
@@ -167,7 +165,7 @@ export default async function codegraphExtension(pi: ExtensionAPI) {
 	const projectPath = () =>
 		Type.Optional(
 			Type.String({
-				description: "Project path to query; defaults to the current working directory",
+				description: "Project path (default: cwd)",
 			}),
 		);
 
