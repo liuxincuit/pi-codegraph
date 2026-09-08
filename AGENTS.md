@@ -33,8 +33,9 @@ pi -e ./extensions/codegraph.ts   # 不安装直接试运行扩展
 
 ## 测试指南
 
-- 无单元测试框架。验证 = `npm run typecheck` + `npm run smoke`（mock pi + 真实 CLI，覆盖未索引直通、命令注册、session 状态流转）。
-- 涉及 CLI 调用或 session 钩子的改动，必须保证 smoke 全绿；无法运行 smoke 时需说明原因。
+- 无单元测试框架。验证 = `npm run typecheck` + `npm run smoke`。
+- smoke 覆盖两态：CLI 缺失（断言不注入任何工具/命令/技能、仅一次安装提示）与 CLI 存在（mock pi + 真实 CLI 验证未索引直通、命令注册、session 状态流转；CLI 不可用则该场景自动跳过）。
+- 涉及 CLI 调用、session 钩子或注入逻辑的改动，必须保证 smoke 全绿。
 - 冒烟脚本与场景位于 `smoke.mjs`，新增命令/钩子时同步补充场景。
 
 ## 提交与 PR 指南

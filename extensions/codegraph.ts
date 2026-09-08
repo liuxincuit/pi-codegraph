@@ -11,13 +11,18 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const INSTALL_HINT =
-	"codegraph CLI not found on PATH. Install: npm i -g @colbymchenry/codegraph";
+	"未检测到 codegraph CLI（PATH 中无 codegraph 命令），本插件未注入任何工具、命令或技能。" +
+	"安装：npm i -g @colbymchenry/codegraph，然后 /reload 或重启 pi 生效。";
+
+// Whole-process dedup for the missing-CLI hint: extensions re-run per session and
+// per subagent (separate jiti module copies), so gate on globalThis.
+const MISSING_CLI_HINTED = Symbol.for("pi-codegraph.missing-cli-hinted");
 
 // Result of `codegraph version` this session — null until first check.
 let cliAvailable: boolean | null = null;
-let notifiedMissing = false;
 
 async function execCg(
 	pi: ExtensionAPI,
@@ -88,7 +93,25 @@ A \`.codegraph/\` index exists here: SQLite knowledge graph of every symbol, edg
 - Multi-project / Monorepo: pass \`path\` to query any indexed sub-project directory.
 - If a project has no \`.codegraph/\`, use built-in tools there; indexing is the user's decision — suggest /codegraph-init if it comes up.`;
 
-export default function codegraphExtension(pi: ExtensionAPI) {
+// When the CLI is absent, register nothing but a one-shot hint handler: no
+// tools, no commands, no resources_discover (so no skill injection), no sync.
+export function registerMissingCliHint(pi: ExtensionAPI) {
+	pi.on("session_start", async (_event, ctx) => {
+		if ((globalThis as Record<symbol, boolean>)[MISSING_CLI_HINTED]) return;
+		(globalThis as Record<symbol, boolean>)[MISSING_CLI_HINTED] = true;
+		if (ctx.hasUI) ctx.ui.notify(INSTALL_HINT, "warning");
+		pi.sendMessage(
+			{ customType: "codegraph-missing-cli", content: INSTALL_HINT, display: true },
+			{ triggerTurn: false },
+		);
+	});
+}
+
+export default async function codegraphExtension(pi: ExtensionAPI) {
+	if (!(await ensureCli(pi))) {
+		registerMissingCliHint(pi);
+		return;
+	}
 	// ── codegraph_explore tool ─────────────────────────────────────────────
 	pi.registerTool({
 		name: "codegraph_explore",
@@ -238,17 +261,15 @@ export default function codegraphExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	// ── session_start: CLI check + incremental sync + context hint ────────
-	pi.on("session_start", async (event, ctx) => {
-		if (!(await ensureCli(pi))) {
-			updateStatusBar(ctx, false);
-			if (ctx.hasUI && !notifiedMissing) {
-				notifiedMissing = true;
-				ctx.ui.notify(INSTALL_HINT, "warning");
-			}
-			return;
-		}
+	// ── resources_discover: contribute the skill only when the CLI exists ──
+	pi.on("resources_discover", async () => {
+		return {
+			skillPaths: [fileURLToPath(new URL("../skills/codegraph/SKILL.md", import.meta.url))],
+		};
+	});
 
+	// ── session_start: incremental sync + context hint ────────────────────
+	pi.on("session_start", async (event, ctx) => {
 		const indexed = await isIndexed(ctx.cwd);
 		if (indexed) {
 			updateStatusBar(ctx, "sync");

@@ -15,6 +15,8 @@
 npm i -g @colbymchenry/codegraph
 ```
 
+未检测到 CLI 时，插件**不会注入任何工具、命令或技能**（`codegraph_explore`、`/codegraph-*`、CodeGraph 技能均不加载），仅在会话开始时弹出一条安装提示；安装后 `/reload` 或重启 pi 即恢复全部功能。
+
 ## 安装
 
 ### npm（推荐）
