@@ -1,6 +1,6 @@
 {
 	"name": "@liuxincuit/pi-codegraph",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "CodeGraph support for pi — symbol source + call paths via the codegraph CLI",
 	"type": "module",
 	"keywords": [
