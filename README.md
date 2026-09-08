@@ -1,112 +1,114 @@
 # pi-codegraph
 
+> 本仓库 fork 自 [izhimu/pi-codegraph](https://github.com/izhimu/pi-codegraph)，原作者版权信息见 [LICENSE](LICENSE)。
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![pi extension](https://img.shields.io/badge/pi-extension-green.svg)](https://github.com/earendil-works/pi)
 
-[CodeGraph](https://github.com/colbymchenry/codegraph) support for [pi](https://github.com/earendil-works/pi). The agent gets a `codegraph_explore` tool — one query returns the relevant symbols' verbatim line-numbered source plus the call paths between them.
+为 [pi](https://github.com/earendil-works/pi) 提供 [CodeGraph](https://github.com/colbymchenry/codegraph) 支持：智能体将获得一个 `codegraph_explore` 工具——一次查询即可返回相关符号逐字、带行号的源码，以及它们之间的调用路径。
 
-## Requirements
+## 环境要求
 
-The `codegraph` CLI on `PATH`:
+`PATH` 中需要存在 `codegraph` CLI：
 
 ```bash
 npm i -g @colbymchenry/codegraph
 ```
 
-## Install
+## 安装
 
-### npm (recommended)
-
-```bash
-pi install @izhimu/pi-codegraph
-```
-
-### From git
+### npm（推荐）
 
 ```bash
-# Global
-pi install git:github.com/izhimu/pi-codegraph
-
-# Project-local (shared with team via .pi/settings.json)
-pi install git:github.com/izhimu/pi-codegraph -l
+pi install @liuxincuit/pi-codegraph
 ```
 
-### From local path
+### 从 Git 安装
+
+```bash
+# 全局安装
+pi install git:github.com/liuxincuit/pi-codegraph
+
+# 项目本地安装（通过 .pi/settings.json 与团队共享）
+pi install git:github.com/liuxincuit/pi-codegraph -l
+```
+
+### 从本地路径安装
 
 ```bash
 pi install /path/to/pi-codegraph
 ```
 
-### Quick test (no install)
+### 快速测试（无需安装）
 
 ```bash
 pi -e ./extensions/codegraph.ts
 ```
 
-## What you get
+## 功能一览
 
-- **`codegraph_explore` tool** — the agent's primary code-intelligence tool. Query with symbol names or a natural-language question; optionally pass `path` to query another indexed project, and `maxFiles` to cap source lines.
-- **`/codegraph-init [path]`** — build the index for the project (`codegraph init`).
-- **`/codegraph-sync [path]`** — manually sync changes since last index (`codegraph sync`).
-- **`/codegraph-status [path]`** — index status and statistics (`codegraph status`).
-- **`/codegraph-unlock [path]`** — release stale database locks if daemon crashed (`codegraph unlock`).
-- **Session-start sync** — runs `codegraph sync -q` once per session so the index reflects your last edits.
+- **`codegraph_explore` 工具** — 面向智能体的核心代码智能工具。输入符号名或自然语言问题即可查询；可选传 `path` 查询其他已建索引的项目，传 `maxFiles` 限制返回的源码行数。
+- **`/codegraph-init [path]`** — 为项目建立索引（`codegraph init`）。
+- **`/codegraph-sync [path]`** — 手动同步自上次索引以来的改动（`codegraph sync`）。
+- **`/codegraph-status [path]`** — 查看索引状态与统计信息（`codegraph status`）。
+- **`/codegraph-unlock [path]`** — 守护进程崩溃后释放过期的数据库锁（`codegraph unlock`）。
+- **会话开始时自动同步** — 每个会话自动执行一次 `codegraph sync -q`，确保索引反映你最近的编辑。
 
-## Usage
+## 使用方法
 
-Ask structural code questions as usual — the agent calls `codegraph_explore` first when the project is indexed:
+像往常一样提出结构性问题即可——项目建立索引后，智能体会优先调用 `codegraph_explore`：
 
-- "How does session loading work?"
-- "What breaks if I change `ExtensionRunner.emit`?"
+- "会话加载是如何工作的？"
+- "如果我修改 `ExtensionRunner.emit`，会破坏什么？"
 
-The first time you use pi in a fresh project, build the index once:
+在新项目中第一次使用 pi 时，请先手动建立一次索引：
 
 ```
 /codegraph-init
 ```
 
-Indexing is always your explicit action — the agent never runs `codegraph init` itself (see `docs/adr/0002`).
+索引构建始终由你显式触发——智能体自身不会运行 `codegraph init`（见 `docs/adr/0002`）。
 
-## How It Works
+## 工作原理
 
-pi has no native MCP support, so the extension bridges to CodeGraph by executing the CLI — `codegraph explore` produces the same output as the `codegraph_explore` MCP tool (see `docs/adr/0001`). One `pi.exec` per tool call: no daemon, no JSON-RPC, nothing to leak or recover.
+pi 原生不支持 MCP，因此本扩展通过执行 CLI 来桥接 CodeGraph——`codegraph explore` 产生与 `codegraph_explore` MCP 工具相同的输出（见 `docs/adr/0001`）。每次工具调用仅需一次 `pi.exec`：没有守护进程、没有 JSON-RPC，没有可泄漏或需要恢复的状态。
 
-The `SKILL.md` in `skills/codegraph/` is auto-discovered by pi's skill system and teaches the agent when to prefer the tool over grep/read.
+`skills/codegraph/` 下的 `SKILL.md` 会被 pi 的技能系统自动发现，用于指导智能体在何种情况下优先使用该工具而非 grep/read。
 
-## Project Structure
+## 项目结构
 
 ```
 pi-codegraph/
 ├── extensions/
-│   └── codegraph.ts      # pi ExtensionAPI integration
+│   └── codegraph.ts      # pi ExtensionAPI 集成
 ├── skills/
 │   └── codegraph/
-│       └── SKILL.md      # agent guidance for codegraph_explore
-├── docs/adr/             # design decisions
-├── CONTEXT.md            # domain glossary
-├── package.json          # pi package manifest
+│       └── SKILL.md      # codegraph_explore 的智能体使用指南
+├── docs/adr/             # 设计决策记录
+├── CONTEXT.md            # 领域术语表
+├── package.json          # pi 包清单
 ├── tsconfig.json
 ├── LICENSE
 └── README.md
 ```
 
-## Development
+## 开发
 
 ```bash
 npm install
 npm run typecheck
 ```
 
-## Contributing
+## 贡献
 
-Contributions welcome! Please:
+欢迎提交贡献！请：
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feat/amazing-feature`)
-3. Commit your changes (`git commit -m 'feat: add amazing feature'`)
-4. Push to the branch (`git push origin feat/amazing-feature`)
-5. Open a Pull Request
+1. Fork 本仓库
+2. 新建功能分支（`git checkout -b feat/amazing-feature`）
+3. 提交改动（`git commit -m 'feat: add amazing feature'`）
+4. 推送到分支（`git push origin feat/amazing-feature`）
+5. 发起 Pull Request
 
 ## License
 
-[MIT](LICENSE) © [izhimu](https://github.com/izhimu)
+[MIT](LICENSE) © [liuxincuit](https://github.com/liuxincuit)，fork 自 [izhimu/pi-codegraph](https://github.com/izhimu/pi-codegraph)。
