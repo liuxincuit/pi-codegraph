@@ -100,10 +100,6 @@ export function registerMissingCliHint(pi: ExtensionAPI) {
 		if ((globalThis as Record<symbol, boolean>)[MISSING_CLI_HINTED]) return;
 		(globalThis as Record<symbol, boolean>)[MISSING_CLI_HINTED] = true;
 		if (ctx.hasUI) ctx.ui.notify(INSTALL_HINT, "warning");
-		pi.sendMessage(
-			{ customType: "codegraph-missing-cli", content: INSTALL_HINT, display: true },
-			{ triggerTurn: false },
-		);
 	});
 }
 

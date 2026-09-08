@@ -53,18 +53,25 @@ const loadExtension = (pi) =>
 		args[0] === "version"
 			? { stdout: "", stderr: "'codegraph' is not recognized", code: 1, killed: false }
 			: { stdout: "", stderr: "no codegraph", code: 1, killed: false };
-	const { pi, tools, commands, handlers, sent } = makePi(fakeExec);
+	const { pi, tools, commands, handlers } = makePi(fakeExec);
 	await loadExtension(pi);
 	if (tools.size !== 0) fail(`expected no tools when CLI missing, got: ${[...tools.keys()]}`);
 	if (commands.size !== 0) fail(`expected no commands when CLI missing, got: ${[...commands.keys()]}`);
 	if (handlers.has("resources_discover")) fail("expected no resources_discover handler when CLI missing");
 	const onStart = handlers.get("session_start");
 	if (!onStart) fail("expected a session_start hint handler when CLI missing");
-	await onStart({ reason: "start" }, ctx(process.cwd(), true));
-	const hint = sent.find((m) => m.customType === "codegraph-missing-cli");
-	if (!hint || !hint.content.includes("codegraph")) fail(`expected install hint message, got: ${JSON.stringify(sent)}`);
-	await onStart({ reason: "reload" }, ctx(process.cwd(), true));
-	if (sent.length > 1) fail(`expected hint to be sent exactly once, got ${sent.length} messages`);
+	const notifyCalls = [];
+	const uiCtx = {
+		cwd: process.cwd(),
+		hasUI: true,
+		ui: { notify: (m, l) => notifyCalls.push({ m, l }), setStatus: () => {} },
+	};
+	await onStart({ reason: "start" }, uiCtx);
+	if (notifyCalls.length !== 1 || !notifyCalls[0].m.includes("codegraph")) {
+		fail(`expected a single install-hint notify, got: ${JSON.stringify(notifyCalls)}`);
+	}
+	await onStart({ reason: "reload" }, uiCtx);
+	if (notifyCalls.length !== 1) fail(`expected hint notified exactly once, got ${notifyCalls.length} calls`);
 	console.log("missing-cli no-injection OK");
 }
 
