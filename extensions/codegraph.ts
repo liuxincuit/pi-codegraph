@@ -8,6 +8,7 @@
 // Upstream: https://github.com/colbymchenry/codegraph
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { TSchema, Type } from "typebox";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -78,25 +79,85 @@ function updateStatusBar(ctx: ExtensionContext, state: StatusState) {
 	}
 }
 
-// Modeled on upstream's MCP SERVER_INSTRUCTIONS (src/mcp/server-instructions.ts):
-// lead the agent to the codegraph_* tools BEFORE grep/read, plus anti-patterns and staleness handling.
-const INDEX_HINT = `# CodeGraph — this project is indexed
+// 仿照上游 MCP SERVER_INSTRUCTIONS（src/mcp/server-instructions.ts）编写：引导智能体
+// 在 grep/read 之前优先使用 codegraph 工具，并给出反模式与过期处理。提示内容按实际
+// 启用的工具集生成：未开启的工具绝不被宣传（见 docs/adr/0003），避免智能体调用
+// 不存在的工具。
+const EXPLORE_HINT_LINE =
+	"`codegraph_explore` — 一次调用完成广泛探索：相关符号的源码 + 调用路径。" +
+	"可以点名端点符号（如 `mutateElement renderScene`）以跨越动态分派跳转揭示调用路径。";
 
-A \`.codegraph/\` index exists here: SQLite knowledge graph of every symbol, edge, and file (30+ languages). It answers structural code questions with verbatim, line-numbered source (treat codegraph output as already Read — safe to Edit from).
+const EXTRA_TOOL_HINT_LINES: Record<string, string> = {
+	codegraph_query: "`codegraph_query` — 定位符号：位置 + 签名，不含源码。",
+	codegraph_node:
+		"`codegraph_node` — 单个符号的源码 + 调用/被调轨迹（可链式追踪调用图）。",
+	codegraph_callers: "`codegraph_callers` — 谁调用了某符号。",
+	codegraph_callees: "`codegraph_callees` — 某符号调用了什么。",
+	codegraph_impact: "`codegraph_impact` — 修改某符号的影响范围（编辑前调用）。",
+	codegraph_files: "`codegraph_files` — 已建索引的文件树（tree/flat/grouped 按语言分组）。",
+};
 
-- For structural questions (how does X work / where is X / who calls Y / what breaks if I change Z), use the codegraph_* tools INSTEAD of grep + read — usually ONE call answers the whole question.
-- Choose the right tool:
-  - \`codegraph_query\` — locate a symbol: locations + signatures only.
-  - \`codegraph_node\` — one symbol's source + caller/callee trail (chain it to follow a call graph).
-  - \`codegraph_callers\` — who calls a symbol. \`codegraph_callees\` — what a symbol calls.
-  - \`codegraph_impact\` — blast radius of changing a symbol (call before editing).
-  - \`codegraph_files\` — indexed file tree (tree/flat/grouped by language).
-  - \`codegraph_explore\` — broad questions: relevant symbols' source + call paths in one shot. Name endpoint symbols (e.g. \`mutateElement renderScene\`) to surface paths across dynamic-dispatch hops.
-- Anti-patterns: don't grep or Read first; don't re-verify codegraph output with grep (AST-derived, more accurate than grep); don't reconstruct a flow by hand.
-- "Already sent earlier in this conversation": pointer means content is already in context — do not re-fetch or Read.
-- Staleness: if tool output contains "⚠️ Some files referenced below were edited since the last index sync", read only those flagged files directly.
-- Multi-project / Monorepo: pass \`path\` to query any indexed sub-project directory.
-- If a project has no \`.codegraph/\`, use built-in tools there; indexing is the user's decision — suggest /codegraph-init if it comes up.`;
+const HIDDEN_TOOLS_NOTE =
+	"细粒度工具（`codegraph_query` `codegraph_node` `codegraph_callers` `codegraph_callees` " +
+	"`codegraph_impact` `codegraph_files`）默认隐藏以保持工具列表精简，只有用户通过配置开启后才会注册" +
+	"（全局 `~/.pi/agent/extensions/pi-codegraph/config.json` 或项目 `.pi/extensions/pi-codegraph/config.json` 的 " +
+	"`extraTools`）——当前会话请勿调用它们。";
+
+function buildIndexHint(enabled: Set<string>): string {
+	const lines = [
+		"# CodeGraph — 本项目已建立索引",
+		"",
+		"这里存在 `.codegraph/` 索引：项目每个符号、边、文件构成的 SQLite 知识图谱（支持 30+ 语言）。" +
+			"它可以回答结构性问题，并给出逐字、带行号的源码（把 codegraph 输出视为已经 Read 过的内容，可直接据此编辑）。",
+		"",
+		"- 对于结构性问题（X 如何工作 / X 在哪里 / 谁调用 Y / 修改 Z 会破坏什么），应使用 codegraph 工具" +
+			"而不是 grep + read——通常一次调用即可完整回答。",
+		`- ${EXPLORE_HINT_LINE}`,
+	];
+	for (const name of Object.keys(EXTRA_TOOL_HINT_LINES)) {
+		if (enabled.has(name)) lines.push(`- ${EXTRA_TOOL_HINT_LINES[name]}`);
+	}
+	lines.push(
+		enabled.size === 0
+			? `- ${HIDDEN_TOOLS_NOTE}`
+			: "- 以上细粒度工具已通过 `extraTools` 配置开启。",
+	);
+	lines.push(
+		"- 反模式：不要先用 grep 或 Read；不要用 grep 重复验证 codegraph 输出（基于 AST，比 grep 更准确）；不要手工重建调用流程。",
+		'- "Already sent earlier in this conversation"：该提示表示内容已在会话上下文中——不要重新获取或 Read。',
+		'- 过期提示：如果工具输出包含 "⚠️ Some files referenced below were edited since the last index sync"，只直接读取其中被标记的文件。',
+		"- 多项目 / Monorepo：传入 `path` 查询任意已建索引的子项目目录。",
+		"- 项目没有 `.codegraph/` 时，在该项目使用内置工具；是否建索引由用户决定——必要时建议 /codegraph-init。",
+	);
+	return lines.join("\n");
+}
+
+// ── 配置：细粒度工具 opt-in（docs/adr/0003）───────────────────────────
+// 全局配置在 ~/.pi/agent/extensions/pi-codegraph/config.json，项目配置在
+// .pi/extensions/pi-codegraph/config.json（覆盖全局，仅对受信任项目生效）。
+// 结构为扁平 JSON：{ "extraTools": ["node", "impact"] }。pi 没有第三方
+// 扩展配置 API，故由扩展自行读取这两个文件。
+type CgConfig = { extraTools?: string[] | "all" };
+
+const CONFIG_REL_PATH = path.join("extensions", "pi-codegraph", "config.json");
+
+async function readConfigFile<T>(file: string): Promise<T | undefined> {
+	try {
+		const raw = await fs.readFile(file, "utf8");
+		return JSON.parse(raw) as T;
+	} catch {
+		return undefined;
+	}
+}
+
+async function loadCgConfig(ctx: ExtensionContext): Promise<CgConfig> {
+	const global = await readConfigFile<CgConfig>(path.join(getAgentDir(), CONFIG_REL_PATH));
+	let project: CgConfig | undefined;
+	if (ctx.isProjectTrusted()) {
+		project = await readConfigFile<CgConfig>(path.join(ctx.cwd, CONFIG_DIR_NAME, CONFIG_REL_PATH));
+	}
+	return { ...(global ?? {}), ...(project ?? {}) };
+}
 
 // When the CLI is absent, register nothing but a one-shot hint handler: no
 // tools, no commands, no resources_discover (so no skill injection), no sync.
@@ -342,8 +403,53 @@ export default async function codegraphExtension(pi: ExtensionAPI) {
 		},
 	];
 
-	for (const tool of cliTools) {
-		registerCliTool(pi, tool);
+	// 细粒度工具为 opt-in：仅当配置开启时才注册，保证默认工具列表精简（见
+	// docs/adr/0003）。`registeredExtraTools` 防止同一进程内重复注册；
+	// `enabledExtraTools` 同时驱动活动工具集与注入的提示内容。
+	const registeredExtraTools = new Set<string>();
+	let enabledExtraTools = new Set<string>();
+
+	const extraToolKey = (def: CliToolDef) => def.name.replace(/^codegraph_/, "");
+
+	function resolveExtraTools(cfg: CgConfig, ctx: ExtensionContext): Set<string> {
+		const enabled = new Set<string>();
+		const wanted = cfg.extraTools ?? [];
+		const names = wanted === "all" ? cliTools.map((d) => d.name) : wanted;
+		for (const item of names) {
+			const key = typeof item === "string" ? item.trim() : "";
+			const def = cliTools.find((d) => d.name === key || extraToolKey(d) === key);
+			if (def) {
+				enabled.add(def.name);
+			} else if (key && ctx.hasUI) {
+				ctx.ui.notify(`codegraph: unknown extra tool "${item}" (ignored)`, "warning");
+			}
+		}
+		return enabled;
+	}
+
+	function applyExtraTools(pi: ExtensionAPI, cfg: CgConfig, ctx: ExtensionContext) {
+		enabledExtraTools = resolveExtraTools(cfg, ctx);
+		for (const def of cliTools) {
+			if (enabledExtraTools.has(def.name) && !registeredExtraTools.has(def.name)) {
+				registerCliTool(pi, def);
+				registeredExtraTools.add(def.name);
+			}
+		}
+		// 将活动工具集与配置对齐：此前已注册但当前未启用的工具（例如切换项目后）
+		// 不得再出现在系统提示中。
+		const active = new Set(pi.getActiveTools());
+		const extraNames = new Set(cliTools.map((d) => d.name));
+		let changed = false;
+		for (const name of extraNames) {
+			if (enabledExtraTools.has(name) && !active.has(name)) {
+				active.add(name);
+				changed = true;
+			} else if (!enabledExtraTools.has(name) && active.has(name)) {
+				active.delete(name);
+				changed = true;
+			}
+		}
+		if (changed) pi.setActiveTools([...active]);
 	}
 
 	// ── /codegraph-init ────────────────────────────────────────────────────
@@ -454,8 +560,10 @@ export default async function codegraphExtension(pi: ExtensionAPI) {
 		};
 	});
 
-	// ── session_start: incremental sync + context hint ────────────────────
+	// ── session_start：opt-in 工具 + 增量同步 + 上下文提示 ───────────────
 	pi.on("session_start", async (event, ctx) => {
+		const cfg = await loadCgConfig(ctx);
+		applyExtraTools(pi, cfg, ctx);
 		const indexed = await isIndexed(ctx.cwd);
 		if (indexed) {
 			updateStatusBar(ctx, "sync");
@@ -474,7 +582,7 @@ export default async function codegraphExtension(pi: ExtensionAPI) {
 		// "reload": extensions rebind in place and the message would duplicate.
 		if (event.reason !== "reload" && indexed) {
 			pi.sendMessage(
-				{ customType: "codegraph-context", content: INDEX_HINT, display: false },
+				{ customType: "codegraph-context", content: buildIndexHint(enabledExtraTools), display: false },
 				{ triggerTurn: false },
 			);
 		}

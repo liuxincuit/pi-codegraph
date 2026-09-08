@@ -30,6 +30,7 @@ pi -e ./extensions/codegraph.ts   # 不安装直接试运行扩展
 - **Tab 缩进**、单引号、行尾分号；无 lint/prettier 配置，与现有代码保持一致。
 - agent 可见标识均为小写 kebab-case：工具 `codegraph_explore` 除外（沿用上游命名）、命令 `/codegraph-init`、`/codegraph-sync` 等。
 - 不得在代码中硬编码密钥或本机路径；文档使用 `path` 等相对表述。
+- **注释、文档一律使用中文**（代码标识符、工具名等除外）；涉及上游/索引输出的原文引用（如 "Already sent earlier in this conversation"）可保留原文并附中文说明。
 
 ## 测试指南
 

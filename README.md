@@ -50,12 +50,8 @@ pi -e ./extensions/codegraph.ts
 ## 功能一览
 
 - **`codegraph_*` 工具集** — 面向智能体的代码智能工具，均支持 `path` 参数查询其他已建索引的项目：
-  - `codegraph_explore` — 一揽子探索：相关符号逐字源码 + 调用路径 + 影响范围（`maxFiles` 限制返回行数）
-  - `codegraph_query` — 按名称搜索符号（位置 + 签名，可选 `kind`/`limit` 过滤）
-  - `codegraph_node` — 单个符号的源码 + 调用轨迹，可链式追踪调用图
-  - `codegraph_callers` / `codegraph_callees` — 谁调用了它 / 它调用了谁（`limit`）
-  - `codegraph_impact` — 修改符号的影响半径（`depth`）
-  - `codegraph_files` — 从索引查看文件结构（tree/flat/grouped，`pattern`、`maxDepth`）
+  - `codegraph_explore`（**默认注册**）— 一揽子探索：相关符号逐字源码 + 调用路径 + 影响范围（`maxFiles` 限制返回行数）
+  - `codegraph_query` / `codegraph_node` / `codegraph_callers` / `codegraph_callees` / `codegraph_impact` / `codegraph_files`（**默认隐藏**，见下方配置）
 - **`/codegraph-init [path]`** — 为项目建立索引（`codegraph init`）。
 - **`/codegraph-sync [path]`** — 手动同步自上次索引以来的改动（`codegraph sync`）。
 - **`/codegraph-status [path]`** — 查看索引状态与统计信息（`codegraph status`）。
@@ -76,6 +72,18 @@ pi -e ./extensions/codegraph.ts
 ```
 
 索引构建始终由你显式触发——智能体自身不会运行 `codegraph init`（见 `docs/adr/0002`）。
+
+## 细粒度工具（可选开启）
+
+`codegraph_explore` 能覆盖绝大多数结构化查询，因此另外 6 个细粒度工具默认**不注册**，避免过多工具增加智能体的决策负担（见 `docs/adr/0003`）。需要时在全局 `~/.pi/agent/extensions/pi-codegraph/config.json` 或项目 `.pi/extensions/pi-codegraph/config.json` 中配置 `extraTools` 开启（项目配置覆盖全局）：
+
+```json
+{
+  "extraTools": ["query", "node", "impact"]
+}
+```
+
+短名（`node`、`impact`）与完整工具名（`codegraph_node`）均可用，`"all"` 开启全部。配置在下一个会话生效（`/reload` 或重启 pi）。
 
 ## 工作原理
 
