@@ -49,3 +49,8 @@ pi -e ./extensions/codegraph.ts   # 不安装直接试运行扩展
 
 - 本文件会被 pi 作为项目指令自动加载；改动 `skills/codegraph/SKILL.md` 或 `extensions/codegraph.ts` 前，先读 `docs/adr/0001`（CLI 桥接）与 `docs/adr/0002`（手动索引）。
 - 描述性文字遵循 `CONTEXT.md` 术语（"项目/索引/查询/同步"），避免歧义词。
+
+## 项目约定（由 retrospective 管理）
+
+- **涉及工具暴露/激活的改动，验证不能只靠 `typecheck` + `smoke`**：例外的是真实 pi 跑四种场景——工作目录未索引、已索引、`inject: "always"`、跨目录发现——并从 session JSONL 断言第一条 system 消息的 `toolsAdded`（声明给模型的工具）与 `sections.skills`（注入的技能）符合预期（2026-09-30，背景见 `docs/adr/0004`）。
+- **devDependency 必须与本地实际运行的 pi 对齐**（当前 `^0.99.1`）：pi 包以 peer `*` 声明时本地可能装的是旧版，`defaultActive` / `ToolResultEvent.structuredContent` 这类新 API 在旧类型里不存在，会逼出 cast 或直接编译不过（2026-09-30 实测：本地 0.83.0 vs 运行时 0.99.1）。
