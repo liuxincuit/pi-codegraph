@@ -52,6 +52,7 @@ pi -e ./extensions/codegraph.ts
 - **`codegraph_*` 工具集** — 面向智能体的代码智能工具，均支持 `path` 参数查询其他已建索引的项目：
   - `codegraph_explore`（**默认注册**）— 一揽子探索：相关符号逐字源码 + 调用路径 + 影响范围（`maxFiles` 限制返回行数）
   - `codegraph_query` / `codegraph_node` / `codegraph_callers` / `codegraph_callees` / `codegraph_impact` / `codegraph_files`（**默认隐藏**，见下方配置）
+- **工具可用性按需判定** — 只有工作目录已建索引（或本会话探索到了某个已建索引的目录）时，工具才会出现在系统提示里；跨目录探索到索引目录时会即时注入提示，并在 TUI / RPC 弹出通知（见 `docs/adr/0004`）。
 - **`/codegraph-init [path]`** — 为项目建立索引（`codegraph init`）。
 - **`/codegraph-sync [path]`** — 手动同步自上次索引以来的改动（`codegraph sync`）。
 - **`/codegraph-status [path]`** — 查看索引状态与统计信息（`codegraph status`）。
@@ -73,23 +74,37 @@ pi -e ./extensions/codegraph.ts
 
 索引构建始终由你显式触发——智能体自身不会运行 `codegraph init`（见 `docs/adr/0002`）。
 
+## 工具何时可用
+
+工具出现在系统提示里需要满足下面任一条件（详见 `docs/adr/0004`）：
+
+1. **工作目录已建索引** — 默认情况，`codegraph_*` 可用，提示词告知项目已建索引。
+2. **探索到其他已建索引的目录** — 例如在 `/a` 启动 pi，让智能体读 `/b` 下的文件；发现 `/b/.codegraph/` 后，工具会立即被声明，并把提示追加到那次工具结果里，同时在 TUI 弹出“发现 CodeGraph 索引: /b”。每个索引目录每会话只提示一次。
+3. **配置 `inject: "always"`** — 无论工作目录有没有索引都声明工具，便于长期在 monorepo 根目录使用。
+
+工作目录没有索引、也没探索到索引时，`codegraph_*` **不会出现**在工具列表里，也不会注入任何提示——绝不会宣传调不到的工具。用 `/codegraph-init` 建好索引后，当前会话会立即启用并补上提示。
+
 ## 细粒度工具（可选开启）
 
-`codegraph_explore` 能覆盖绝大多数结构化查询，因此另外 6 个细粒度工具默认**不注册**，避免过多工具增加智能体的决策负担（见 `docs/adr/0003`）。需要时在全局 `~/.pi/agent/extensions/pi-codegraph/config.json` 或项目 `.pi/extensions/pi-codegraph/config.json` 中配置 `extraTools` 开启（项目配置覆盖全局）：
+`codegraph_explore` 能覆盖绝大多数结构化查询，因此另外 6 个细粒度工具默认**不注册**，避免过多工具增加智能体的决策负担（见 `docs/adr/0003`）。需要时在全局 `~/.pi/agent/extensions/pi-codegraph/config.json` 或项目 `.pi/extensions/pi-codegraph/config.json` 中配置（项目配置覆盖全局，仅对受信任项目生效）：
 
 ```json
 {
-  "extraTools": ["query", "node", "impact"]
+  "extraTools": ["query", "node", "impact"],
+  "inject": "auto"
 }
 ```
 
-短名（`node`、`impact`）与完整工具名（`codegraph_node`）均可用，`"all"` 开启全部。配置在下一个会话生效（`/reload` 或重启 pi）。
+- `extraTools`：短名（`node`、`impact`）与完整工具名（`codegraph_node`）均可用，`"all"` 开启全部。
+- `inject`：`"auto"`（默认，按上方“工具何时可用”判定）或 `"always"`（无条件声明工具）。
+
+配置在下一个会话生效（`/reload` 或重启 pi）。
 
 ## 工作原理
 
 pi 原生不支持 MCP，因此本扩展通过执行 CLI 来桥接 CodeGraph——`codegraph explore` 产生与 `codegraph_explore` MCP 工具相同的输出（见 `docs/adr/0001`）。每次工具调用仅需一次 `pi.exec`：没有守护进程、没有 JSON-RPC，没有可泄漏或需要恢复的状态。
 
-`skills/codegraph/` 下的 `SKILL.md` 会被 pi 的技能系统自动发现，用于指导智能体在何种情况下优先使用该工具而非 grep/read。
+`skills/codegraph/` 下的 `SKILL.md` 会被 pi 的技能系统自动发现，用于指导智能体在何种情况下优先使用该工具而非 grep/read；只有在工具确实可用（gate 为真）的会话里才会注入。
 
 ## 项目结构
 

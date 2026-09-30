@@ -64,6 +64,73 @@ async function isIndexed(cwd: string): Promise<boolean> {
 	}
 }
 
+// ── 路径发现（docs/adr/0004）──────────────────────────────────────────
+// 工具的输入里带路径时，向上查找最近的已建索引目录；找到即向模型注入提示。
+
+// 只认工具输入里的路径参数：内置 read/edit/write/ls/grep/find 与 codegraph 工具都用
+// `path`，codegraph_files 另有 `dir`。bash 没有路径参数，不解析命令字符串。
+function inputPathOf(input: Record<string, unknown>): string | undefined {
+	for (const key of ["path", "dir"]) {
+		const value = input[key];
+		if (typeof value === "string" && value.trim() !== "") return value;
+	}
+	return undefined;
+}
+
+// 向上最多查这么多层，避免在无关路径上走出长链。
+const INDEX_WALK_LIMIT = 10;
+
+/**
+ * 从目标路径（文件或目录）向上找最近的已建索引目录，找不到返回 null。
+ * 判据与状态栏一致（`.codegraph/codegraph.db` 存在）；缓存以目录为键，
+ * 途中命中缓存即提前结束，负结果也写回缓存。
+ */
+async function findIndexRoot(
+	target: string,
+	cwd: string,
+	cache: Map<string, string | null>,
+): Promise<string | null> {
+	let dir = path.resolve(cwd, target);
+	try {
+		if (!(await fs.stat(dir)).isDirectory()) dir = path.dirname(dir);
+	} catch {
+		// 不存在的路径（如 read 失败）按父目录继续。
+		dir = path.dirname(dir);
+	}
+
+	const visited: string[] = [];
+	for (let depth = 0; depth < INDEX_WALK_LIMIT; depth++) {
+		const known = cache.get(dir);
+		if (known !== undefined) {
+			for (const seen of visited) cache.set(seen, known);
+			return known;
+		}
+		visited.push(dir);
+		if (await isIndexed(dir)) {
+			for (const seen of visited) cache.set(seen, dir);
+			return dir;
+		}
+		const parent = path.dirname(dir);
+		if (parent === dir) break;
+		dir = parent;
+	}
+	for (const seen of visited) cache.set(seen, null);
+	return null;
+}
+
+/** 发现提示：只描述当下确实可用的工具，避免宣传调不到的工具（docs/adr/0003）。 */
+function discoveryReminder(root: string, activated: boolean): string {
+	const lines = [
+		"<system-reminder>",
+		`发现 CodeGraph 索引：${root}（该目录含 \`.codegraph/\`）`,
+		`对它的结构性问题（X 如何工作 / X 在哪里 / 谁调用 Y / 修改 Z 会破坏什么）用 ` +
+			`\`codegraph_explore(query="…", path=${JSON.stringify(root)})\`，优先于 grep + read。`,
+	];
+	if (activated) lines.push("codegraph 工具已在本次发现中启用，现在即可调用。");
+	lines.push("</system-reminder>");
+	return `\n${lines.join("\n")}\n`;
+}
+
 type StatusState = "index" | "sync" | "init" | boolean | undefined;
 
 function updateStatusBar(ctx: ExtensionContext, state: StatusState) {
@@ -118,26 +185,44 @@ function buildIndexHint(enabled: Set<string>): string {
 		if (enabled.has(name)) lines.push(`- ${EXTRA_TOOL_HINT_LINES[name]}`);
 	}
 	lines.push(
-		enabled.size === 0
-			? `- ${HIDDEN_TOOLS_NOTE}`
-			: "- 以上细粒度工具已通过 `extraTools` 配置开启。",
-	);
-	lines.push(
 		"- 反模式：不要先用 grep 或 Read；不要用 grep 重复验证 codegraph 输出（基于 AST，比 grep 更准确）；不要手工重建调用流程。",
 		'- "Already sent earlier in this conversation"：该提示表示内容已在会话上下文中——不要重新获取或 Read。',
 		'- 过期提示：如果工具输出包含 "⚠️ Some files referenced below were edited since the last index sync"，只直接读取其中被标记的文件。',
 		"- 多项目 / Monorepo：传入 `path` 查询任意已建索引的子项目目录。",
 		"- 项目没有 `.codegraph/` 时，在该项目使用内置工具；是否建索引由用户决定——必要时建议 /codegraph-init。",
+		extraToolsNote(enabled),
 	);
 	return lines.join("\n");
+}
+
+function extraToolsNote(enabled: Set<string>): string {
+	return enabled.size === 0
+		? `- ${HIDDEN_TOOLS_NOTE}`
+		: "- 以上细粒度工具已通过 `extraTools` 配置开启。";
+}
+
+// 工具被配置强制声明、但工作目录没有索引时的提示（`inject: "always"`）。同样按实际
+// 可用的工具集生成：绝不宣传调不到的工具（docs/adr/0003）。
+function buildUnindexedHint(enabled: Set<string>): string {
+	return [
+		"# CodeGraph — 本工作目录未建索引",
+		"",
+		"当前工作目录没有 `.codegraph/` 索引，不要对它调用 codegraph 工具——改用内置工具。" +
+			"本会话的 codegraph 工具已经可用：对任何存在 `.codegraph/` 的目录，传入 `path` 参数查询" +
+			'（例如 `codegraph_explore(query="…", path="/b")`），monorepo 里尤其有用。',
+		"- 给当前项目建索引由用户决定——不要自行运行 `codegraph init`，必要时建议 /codegraph-init。",
+		extraToolsNote(enabled),
+	].join("\n");
 }
 
 // ── 配置：细粒度工具 opt-in（docs/adr/0003）───────────────────────────
 // 全局配置在 ~/.pi/agent/extensions/pi-codegraph/config.json，项目配置在
 // .pi/extensions/pi-codegraph/config.json（覆盖全局，仅对受信任项目生效）。
-// 结构为扁平 JSON：{ "extraTools": ["node", "impact"] }。pi 没有第三方
-// 扩展配置 API，故由扩展自行读取这两个文件。
-type CgConfig = { extraTools?: string[] | "all" };
+// 结构为扁平 JSON：{ "extraTools": ["node", "impact"], "inject": "always" }。
+// pi 没有第三方扩展配置 API，故由扩展自行读取这两个文件。
+// `inject` 控制工具可用性（docs/adr/0004）："auto"（默认）只在工作目录已建索引、
+// 或本会话探索发现索引目录时声明工具；"always" 无条件声明。
+type CgConfig = { extraTools?: string[] | "all"; inject?: "auto" | "always" };
 
 const CONFIG_REL_PATH = path.join("extensions", "pi-codegraph", "config.json");
 
@@ -186,6 +271,8 @@ export default async function codegraphExtension(pi: ExtensionAPI) {
 			"For structural code questions (how does X work, where is X, what breaks if I change X), prefer codegraph_explore over grep when the project has a .codegraph/ index.",
 			"Indexing is the user's decision — never run codegraph init yourself; suggest /codegraph-init instead.",
 		],
+		// 注册 ≠ 声明给模型：活动集由 setToolsEnabled() 按 gate 决定（docs/adr/0004）。
+		defaultActive: false,
 		parameters: Type.Object({
 			query: Type.String({
 				description: "Symbol names or a natural-language question about the code",
@@ -250,6 +337,7 @@ export default async function codegraphExtension(pi: ExtensionAPI) {
 			description: def.description,
 			promptSnippet: def.snippet,
 			promptGuidelines: def.guidelines,
+			defaultActive: false,
 			parameters: def.parameters,
 			execute: async (_toolCallId, params: Record<string, unknown>, signal, _onUpdate, ctx) => {
 				const cwd = (params.path as string | undefined) ?? ctx.cwd;
@@ -403,11 +491,19 @@ export default async function codegraphExtension(pi: ExtensionAPI) {
 		},
 	];
 
-	// 细粒度工具为 opt-in：仅当配置开启时才注册，保证默认工具列表精简（见
-	// docs/adr/0003）。`registeredExtraTools` 防止同一进程内重复注册；
-	// `enabledExtraTools` 同时驱动活动工具集与注入的提示内容。
+	// 细粒度工具为 opt-in：仅当配置开启时才注册，保证注册表精简（见 docs/adr/0003）。
+	// `registeredExtraTools` 防止同一进程内重复注册；`enabledExtraTools` 与
+	// `toolsEnabled` 一起驱动活动集与注入的提示内容。
 	const registeredExtraTools = new Set<string>();
 	let enabledExtraTools = new Set<string>();
+
+	// 本会话 codegraph 工具是否声明给模型（docs/adr/0004）：session_start 判定初始值，
+	// 路径发现与 /codegraph-init 成功后可以把它从 false 翻到 true。
+	let toolsEnabled = false;
+
+	// 路径发现的会话级状态：已提示过的索引根、目录→索引根的查找缓存。
+	const discoveredRoots = new Set<string>();
+	const indexRootCache = new Map<string, string | null>();
 
 	const extraToolKey = (def: CliToolDef) => def.name.replace(/^codegraph_/, "");
 
@@ -427,7 +523,30 @@ export default async function codegraphExtension(pi: ExtensionAPI) {
 		return enabled;
 	}
 
-	function applyExtraTools(pi: ExtensionAPI, cfg: CgConfig, ctx: ExtensionContext) {
+	/**
+	 * 按 gate 对齐活动集：explore 加配置开启的细粒度工具。
+	 * 活动集每变一次 pi 都要重建系统提示，因此只在真的变化时调用 setActiveTools。
+	 */
+	function setToolsEnabled(enabled: boolean) {
+		toolsEnabled = enabled;
+		const wanted = new Set(["codegraph_explore", ...enabledExtraTools]);
+		const active = new Set(pi.getActiveTools());
+		let changed = false;
+		for (const name of new Set(["codegraph_explore", ...registeredExtraTools])) {
+			const want = enabled && wanted.has(name);
+			if (want && !active.has(name)) {
+				active.add(name);
+				changed = true;
+			} else if (!want && active.has(name)) {
+				active.delete(name);
+				changed = true;
+			}
+		}
+		if (changed) pi.setActiveTools([...active]);
+	}
+
+	/** 注册配置开启的细粒度工具（注册与 gate 无关），然后按 gate 对齐活动集。 */
+	function applyExtraTools(cfg: CgConfig, ctx: ExtensionContext, enabled: boolean) {
 		enabledExtraTools = resolveExtraTools(cfg, ctx);
 		for (const def of cliTools) {
 			if (enabledExtraTools.has(def.name) && !registeredExtraTools.has(def.name)) {
@@ -435,21 +554,19 @@ export default async function codegraphExtension(pi: ExtensionAPI) {
 				registeredExtraTools.add(def.name);
 			}
 		}
-		// 将活动工具集与配置对齐：此前已注册但当前未启用的工具（例如切换项目后）
-		// 不得再出现在系统提示中。
-		const active = new Set(pi.getActiveTools());
-		const extraNames = new Set(cliTools.map((d) => d.name));
-		let changed = false;
-		for (const name of extraNames) {
-			if (enabledExtraTools.has(name) && !active.has(name)) {
-				active.add(name);
-				changed = true;
-			} else if (!enabledExtraTools.has(name) && active.has(name)) {
-				active.delete(name);
-				changed = true;
-			}
-		}
-		if (changed) pi.setActiveTools([...active]);
+		setToolsEnabled(enabled);
+	}
+
+	/** 工作目录刚建好索引（/codegraph-init 成功）时，补上活动集与索引提示。 */
+	async function enableIfIndexedNow(ctx: ExtensionContext) {
+		if (toolsEnabled || !(await isIndexed(ctx.cwd))) return;
+		const root = path.resolve(ctx.cwd);
+		indexRootCache.set(root, root);
+		setToolsEnabled(true);
+		pi.sendMessage(
+			{ customType: "codegraph-context", content: buildIndexHint(enabledExtraTools), display: false },
+			{ triggerTurn: false },
+		);
 	}
 
 	// ── /codegraph-init ────────────────────────────────────────────────────
@@ -479,6 +596,7 @@ export default async function codegraphExtension(pi: ExtensionAPI) {
 					{ customType: "codegraph-init", content: out, display: true },
 					{ triggerTurn: false },
 				);
+				if (success) await enableIfIndexedNow(ctx);
 			} finally {
 				updateStatusBar(ctx, await isIndexed(ctx.cwd));
 			}
@@ -553,18 +671,29 @@ export default async function codegraphExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	// ── resources_discover: contribute the skill only when the CLI exists ──
-	pi.on("resources_discover", async () => {
+	// ── resources_discover: contribute the skill only when the tools are usable ──
+	pi.on("resources_discover", async (event, ctx) => {
+		const cfg = await loadCgConfig(ctx);
+		if (!(await isIndexed(event.cwd)) && cfg.inject !== "always") return undefined;
 		return {
 			skillPaths: [fileURLToPath(new URL("../skills/codegraph/SKILL.md", import.meta.url))],
 		};
 	});
 
-	// ── session_start：opt-in 工具 + 增量同步 + 上下文提示 ───────────────
+	// ── session_start：gate 判定 + 增量同步 + 上下文提示 ────────────────
 	pi.on("session_start", async (event, ctx) => {
 		const cfg = await loadCgConfig(ctx);
-		applyExtraTools(pi, cfg, ctx);
 		const indexed = await isIndexed(ctx.cwd);
+		const root = path.resolve(ctx.cwd);
+
+		// 发现状态按会话重置；cwd 自身的结果先写进缓存，让常见路径一次命中。
+		discoveredRoots.clear();
+		indexRootCache.clear();
+		indexRootCache.set(root, indexed ? root : null);
+
+		// gate：工作目录已建索引，或用户配置强制声明（docs/adr/0004）。
+		applyExtraTools(cfg, ctx, indexed || cfg.inject === "always");
+
 		if (indexed) {
 			updateStatusBar(ctx, "sync");
 			// Incremental sync; near-zero cost when nothing changed.
@@ -577,15 +706,46 @@ export default async function codegraphExtension(pi: ExtensionAPI) {
 			updateStatusBar(ctx, false);
 		}
 
-		// Inject the agent playbook once per process when the project IS
-		// indexed (upstream does this via MCP initialize instructions). Skip
-		// "reload": extensions rebind in place and the message would duplicate.
-		if (event.reason !== "reload" && indexed) {
+		// Inject the agent playbook when the tools are declared to the model.
+		// Skip "reload": extensions rebind in place and the message would duplicate.
+		if (event.reason !== "reload" && toolsEnabled) {
 			pi.sendMessage(
-				{ customType: "codegraph-context", content: buildIndexHint(enabledExtraTools), display: false },
+				{
+					customType: "codegraph-context",
+					content: indexed ? buildIndexHint(enabledExtraTools) : buildUnindexedHint(enabledExtraTools),
+					display: false,
+				},
 				{ triggerTurn: false },
 			);
 		}
+	});
+
+	// ── 路径发现：探索到其他已建索引目录时注入提示（docs/adr/0004）───────
+	// CLI 不可用时本处理器根本不会注册，因此这里不再重复检查 CLI。
+	pi.on("tool_result", async (event, ctx) => {
+		if (event.isError) return undefined;
+		const target = inputPathOf(event.input);
+		if (!target) return undefined;
+
+		const root = await findIndexRoot(target, ctx.cwd, indexRootCache);
+		if (!root || root === path.resolve(ctx.cwd) || discoveredRoots.has(root)) return undefined;
+		discoveredRoots.add(root);
+
+		// 工具尚未声明给模型时顺手启用：setActiveTools 在下一个 turn 生效，而模型正是
+		// 在下一个 turn 才读到这条注入，两者对齐。
+		const activated = !toolsEnabled;
+		if (activated) setToolsEnabled(true);
+		if (ctx.hasUI) ctx.ui.notify(`发现 CodeGraph 索引: ${root}`, "info");
+
+		return {
+			content: [
+				...(event.content ?? []),
+				{ type: "text" as const, text: discoveryReminder(root, activated) },
+			],
+			// pi 的契约：只替换 content 而不回传 structuredContent 会丢掉结构化输出。
+			...(event.structuredContent === undefined ? {} : { structuredContent: event.structuredContent }),
+			details: event.details,
+		};
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {

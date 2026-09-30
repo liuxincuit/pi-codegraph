@@ -1,6 +1,6 @@
 ---
 name: codegraph
-description: 通过 codegraph_explore 工具查询项目的 CodeGraph 索引（符号源码、调用路径、影响范围）。当回答结构化代码问题——X 如何工作、X 在哪里、谁调用 Y、修改某处会影响什么——且项目存在 .codegraph/ 索引时使用。
+description: 通过 codegraph_explore 工具查询 CodeGraph 索引（符号源码、调用路径、影响范围）。当回答结构化代码问题——X 如何工作、X 在哪里、谁调用 Y、修改某处会影响什么——且 `Available tools` 中存在 codegraph 工具（本工作目录或本会话探索到的其他目录已建索引）时使用。
 ---
 
 # CodeGraph
@@ -11,7 +11,17 @@ description: 通过 codegraph_explore 工具查询项目的 CodeGraph 索引（�
 
 - `codegraph_explore` — 一次调用完成广泛探索：相关符号的源码 + 调用路径。可以点名端点符号（`mutateElement renderScene`）以跨越动态分派跳转揭示调用路径。参数：`query`（符号名或自然语言问题）、可选 `maxFiles`（限制返回源码行数）。
 
-绝大多数结构化问题只需 `codegraph_explore` 即可解决。该工具始终注册。
+绝大多数结构化问题只需 `codegraph_explore` 即可解决。它只在有索引可查时才会出现在 `Available tools` 中。
+
+## 工具何时可用
+
+不要假设 codegraph 工具总是存在——先看 `Available tools`。它会在三种情况下出现：
+
+1. 当前工作目录已建索引；
+2. **本会话探索到了**某个已建索引的目录：当 `read`/`ls`/`grep`/`find`/`edit`/`write` 触及的路径位于（或位于其下）一个含 `.codegraph/` 的目录时，那次工具结果里会出现 `发现 CodeGraph 索引：<目录>` 的提示，工具从下一个 turn 起即可调用；
+3. 用户配置了 `inject: "always"`。
+
+收到发现提示时，提示里给出的 `path` 就是新发现的索引根，直接用它查询即可。列表里没有 codegraph 工具时，说明本会话没有可查的索引：用内置工具，不要尝试猜测性地调用。
 
 ## 细粒度工具（可选开启）
 
@@ -26,14 +36,14 @@ description: 通过 codegraph_explore 工具查询项目的 CodeGraph 索引（�
 开启方式：在 `~/.pi/agent/extensions/pi-codegraph/config.json`（全局）或 `.pi/extensions/pi-codegraph/config.json`（项目，覆盖全局）中配置：
 
 ```json
-{ "extraTools": ["query", "node", "impact"] }
+{ "extraTools": ["query", "node", "impact"], "inject": "auto" }
 ```
 
-短名（`node`、`impact`）与完整工具名（`codegraph_node`）均可，`"extraTools": "all"` 开启全部。配置在下一个会话生效（`/reload` 或重启 pi）。如果反复需要某个隐藏工具，可以向用户建议此配置。
+短名（`node`、`impact`）与完整工具名（`codegraph_node`）均可，`"extraTools": "all"` 开启全部；`inject` 为 `"auto"`（默认）或 `"always"`（无索引也声明工具）。配置在下一个会话生效（`/reload` 或重启 pi）。如果反复需要某个隐藏工具，可以向用户建议此配置。
 
 ## 如何查询
 
-- `codegraph_explore` 接受 `path` 参数：要查询的项目目录，默认为当前工作目录。在 monorepo 中，传入包含 `.codegraph/` 的子项目目录。
+- `codegraph_explore` 接受 `path` 参数：要查询的项目目录，默认为当前工作目录。在 monorepo 中，传入包含 `.codegraph/` 的子项目目录；若当前工作目录没有索引而其他目录有，必须传 `path`。
 
 ## 反模式与指导
 

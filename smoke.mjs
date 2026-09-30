@@ -7,6 +7,7 @@
 //      opt-in（见 docs/adr/0003）。CLI 不可用时自动跳过。
 import { execFile } from "node:child_process";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import path from "node:path";
 
 const exec = (command, args, options = {}) =>
 	new Promise((resolve) => {
@@ -21,16 +22,20 @@ const makePi = (execFn) => {
 	const commands = new Map();
 	const handlers = new Map();
 	const sent = [];
-	let activeTools = null; // null = 从未设置；getActiveTools 回退为全部已注册工具
+	// 真实 pi 语义：只有 defaultActive !== false 的工具在注册时自动进入活动集。
+	let activeTools = [];
 	const activeCalls = [];
 	return {
 		pi: {
 			exec: execFn,
-			registerTool: (t) => tools.set(t.name, t),
+			registerTool: (t) => {
+				tools.set(t.name, t);
+				if (t.defaultActive !== false) activeTools.push(t.name);
+			},
 			registerCommand: (n, c) => commands.set(n, c),
 			on: (e, h) => handlers.set(e, h),
 			sendMessage: (m) => sent.push(m),
-			getActiveTools: () => activeTools ?? [...tools.keys()],
+			getActiveTools: () => [...activeTools],
 			setActiveTools: (names) => {
 				activeTools = [...names];
 				activeCalls.push([...names]);
@@ -75,6 +80,7 @@ const lastHint = (sent) => {
 	if (tools.size !== 0) fail(`CLI 缺失时不应注册任何工具，实际为：${[...tools.keys()]}`);
 	if (commands.size !== 0) fail(`CLI 缺失时不应注册任何命令，实际为：${[...commands.keys()]}`);
 	if (handlers.has("resources_discover")) fail("CLI 缺失时不应注册 resources_discover 处理器");
+	if (handlers.has("tool_result")) fail("CLI 缺失时不应注册路径发现处理器");
 	const onStart = handlers.get("session_start");
 	if (!onStart) fail("CLI 缺失时仍应注册 session_start 提示处理器");
 	const notifyCalls = [];
@@ -182,8 +188,8 @@ if (cliProbe.code !== 0) {
 	if (hint2.includes("`codegraph_callers` —")) fail("提示不得宣传未开启的工具");
 	if (hint2.includes("默认隐藏")) fail("有工具开启时提示不得再说默认隐藏");
 	if (!notifyCalls.some((n) => n.m.includes("bogus"))) fail("未知工具名应弹出警告");
-	// 新注册的工具在 pi 中默认即为活动；setActiveTools 只在需要剔除已注册
-	// 工具时才会被调用（见步骤 4）。
+	// 新注册的工具在 pi 中默认未激活（defaultActive: false），由 setToolsEnabled()
+	// 按 gate 加回活动集，因此此处不再断言 setActiveTools 的调用时机。
 	// 3. "all" 开启全部细粒度工具。
 	writeFileSync(`${optin}/.pi/extensions/pi-codegraph/config.json`, JSON.stringify({ extraTools: "all" }));
 	await handlers.get("session_start")({ reason: "start" }, uiCtx(optin));
@@ -279,6 +285,114 @@ if (cliProbe.code !== 0) {
 
 	await onShutdown({}, mockCtx(tmpTestDir));
 	if (currentStatus !== undefined) fail(`shutdown 应清除状态，实际为：${currentStatus}`);
+
+	// ── 路径发现 + inject 配置（docs/adr/0004）──────────────────────────
+	{
+		// 隔离全局配置目录，避免真实用户配置影响 gate 判定。
+		const prevDir = process.env.PI_CODING_AGENT_DIR;
+		const fakeAgent = path.resolve(".smoke-agent-empty");
+		rmSync(fakeAgent, { recursive: true, force: true });
+		process.env.PI_CODING_AGENT_DIR = fakeAgent;
+
+		const discRoot = path.resolve(".smoke-disc");
+		rmSync(discRoot, { recursive: true, force: true });
+		const aDir = path.join(discRoot, "a");
+		mkdirSync(aDir, { recursive: true });
+		for (const name of ["b", "c"]) {
+			mkdirSync(path.join(discRoot, name, ".codegraph"), { recursive: true });
+			writeFileSync(path.join(discRoot, name, ".codegraph", "codegraph.db"), "dummy-db");
+		}
+		writeFileSync(path.join(discRoot, "b", "x.ts"), "export const x = 1;\n");
+
+		const notifyCalls = [];
+		const dctx = (cwd) => ({
+			cwd,
+			hasUI: true,
+			isProjectTrusted: () => true,
+			ui: {
+				notify: (m, l) => notifyCalls.push({ m, l }),
+				setStatus: () => {},
+			},
+		});
+		const ev = (input, extra = {}) => ({
+			type: "tool_result",
+			toolCallId: "t1",
+			input,
+			content: [{ type: "text", text: "file body" }],
+			isError: false,
+			details: undefined,
+			...extra,
+		});
+
+		// 1. 未索引、无配置：工具注册但不声明给模型，也不注入任何提示。
+		const { pi: dpi, handlers: dh, sent: dsent, activeCalls: dActive } = makePi(exec);
+		await loadExtension(dpi);
+		await dh.get("session_start")({ reason: "start" }, dctx(aDir));
+		if (dActive.length !== 0) fail(`未索引且无配置时不应改动活动集，实际：${JSON.stringify(dActive)}`);
+		if (dsent.some((m) => m.customType === "codegraph-context")) {
+			fail("未索引且无配置时不应注入 codegraph 提示");
+		}
+
+		// 2. 探索到 ../b → 注入发现提示 + 懒激活工具 + TUI 通知。
+		const first = await dh.get("tool_result")(
+			ev({ path: "../b/x.ts" }, { structuredContent: { ok: true } }),
+			dctx(aDir),
+		);
+		const firstText = (first?.content ?? []).map((c) => c.text).join("\n");
+		if (!firstText.includes("发现 CodeGraph 索引")) fail("发现索引目录时应注入提示");
+		if (!firstText.includes(path.join(discRoot, "b"))) fail("发现提示应标明索引目录");
+		if (!firstText.includes("file body")) fail("注入不得丢弃原始工具输出");
+		if (first?.structuredContent?.ok !== true) {
+			fail("注入必须回传 structuredContent，否则结构化输出会丢失");
+		}
+		if (notifyCalls.filter((n) => n.m.includes("发现 CodeGraph 索引")).length !== 1) {
+			fail(`发现时应恰好一次 TUI 通知，实际：${JSON.stringify(notifyCalls)}`);
+		}
+		if (!(dActive.at(-1) ?? []).includes("codegraph_explore")) {
+			fail(`发现索引目录后应启用 codegraph 工具，实际：${JSON.stringify(dActive.at(-1))}`);
+		}
+
+		// 3. 同一索引目录只提示一次。
+		if ((await dh.get("tool_result")(ev({ path: "../b/x.ts" }), dctx(aDir))) !== undefined) {
+			fail("同一索引目录不应重复注入");
+		}
+		if (notifyCalls.length !== 1) fail(`重复探索不应重复通知，实际 ${notifyCalls.length} 次`);
+
+		// 4. 未命中索引的路径 / 出错的结果 / 无 path 参数的工具 → 不触发。
+		if ((await dh.get("tool_result")(ev({ path: "x.ts" }), dctx(aDir))) !== undefined) {
+			fail("cwd 内未索引的路径不应注入");
+		}
+		if ((await dh.get("tool_result")(ev({ path: "../c/y.ts" }, { isError: true }), dctx(aDir))) !== undefined) {
+			fail("出错的工具结果不应触发发现");
+		}
+		if ((await dh.get("tool_result")(ev({ command: "ls ../b" }), dctx(aDir))) !== undefined) {
+			fail("无路径参数的工具不应触发发现");
+		}
+		console.log("Discovery: lazy activation + one-shot injection OK");
+
+		// 5. inject: "always" → 工作目录未建索引也声明工具，并注入未建索引版提示。
+		const forcedDir = path.resolve(".smoke-force");
+		rmSync(forcedDir, { recursive: true, force: true });
+		mkdirSync(path.join(forcedDir, ".pi", "extensions", "pi-codegraph"), { recursive: true });
+		writeFileSync(
+			path.join(forcedDir, ".pi", "extensions", "pi-codegraph", "config.json"),
+			JSON.stringify({ inject: "always" }),
+		);
+		const { pi: fpi, handlers: fh, sent: fsent, activeCalls: fActive } = makePi(exec);
+		await loadExtension(fpi);
+		await fh.get("session_start")({ reason: "start" }, dctx(forcedDir));
+		if (!(fActive.at(-1) ?? []).includes("codegraph_explore")) {
+			fail(`inject: always 时应声明 codegraph_explore，实际：${JSON.stringify(fActive.at(-1))}`);
+		}
+		const fHint = [...fsent].reverse().find((m) => m.customType === "codegraph-context")?.content ?? "";
+		if (!fHint.includes("本工作目录未建索引")) fail(`inject: always 时应注入未建索引版提示：${fHint}`);
+		console.log("Config inject: always OK");
+
+		rmSync(discRoot, { recursive: true, force: true });
+		rmSync(forcedDir, { recursive: true, force: true });
+		rmSync(fakeAgent, { recursive: true, force: true });
+		process.env.PI_CODING_AGENT_DIR = prevDir;
+	}
 
 	rmSync(tmpTestDir, { recursive: true, force: true });
 	rmSync(optin, { recursive: true, force: true });

@@ -19,3 +19,11 @@ _Avoid_: search, query, lookup
 **Sync**:
 An incremental update of the Index to match the files currently on disk. Cheap when nothing changed.
 _Avoid_: refresh, rebuild (that's a full re-index)
+
+**Gate**:
+The per-session decision whether codegraph tools are declared to the model, recomputed on session start and turned on by Discovery: the Project is indexed, `inject` is `always`, or Discovery found an index.
+_Avoid_: switch, toggle, mode, flag (ambiguous with pi flags)
+
+**Discovery**:
+Finding an Index that is not the Project's own: a tool touches a path under a directory containing `.codegraph/`, so that directory is surfaced to the agent (and to the user, as a TUI notification) and the tools become available for the rest of the session.
+_Avoid_: scan, watch, auto-init (Discovery never builds an Index — see ADR-0002)
